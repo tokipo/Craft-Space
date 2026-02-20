@@ -3,6 +3,7 @@ import asyncio
 import collections
 import shutil
 import psutil
+import time
 from fastapi import FastAPI, WebSocket, Request, Response, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,562 +13,897 @@ app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 mc_process = None
-output_history = collections.deque(maxlen=300)
+output_history = collections.deque(maxlen=500)
 connected_clients = set()
 BASE_DIR = os.path.abspath("/app")
+CONTAINER_CPU_CORES = 2
+CONTAINER_RAM_MB = 16384
+CONTAINER_STORAGE_GB = 50
 
-# -----------------
-# HTML FRONTEND (Ultra-Modern Web3 SaaS UI)
-# -----------------
 HTML_CONTENT = """
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>DeProxy / MineSpace Engine</title>
-    
-    <!-- Fonts & Icons -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/@phosphor-icons/web"></script>
-    
-    <!-- Terminal -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
-    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-    
-    <!-- Tailwind CSS (Custom Web3 Config) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        dark: '#05050A',
-                        panel: '#0F1017',
-                        surface: '#181A24',
-                        primary: '#9D4EDD',
-                        secondary: '#FF79C6',
-                        accent: '#8BE9FD',
-                        border: '#2A2C3E'
-                    },
-                    fontFamily: {
-                        sans: ['Outfit', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace']
-                    },
-                    boxShadow: {
-                        'neon': '0 0 20px rgba(157, 78, 221, 0.15)',
-                        'neon-strong': '0 0 30px rgba(255, 121, 198, 0.3)',
-                    }
-                }
-            }
-        }
-    </script>
-    
-    <style>
-        body { background-color: theme('colors.dark'); color: #e2e8f0; overflow: hidden; -webkit-font-smoothing: antialiased; }
-        
-        /* Glassmorphism & Cards */
-        .glass-card {
-            background: rgba(15, 16, 23, 0.7);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid theme('colors.border');
-            border-radius: 20px;
-            box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }
-        
-        /* Gradients */
-        .text-gradient { background: linear-gradient(135deg, theme('colors.secondary'), theme('colors.primary')); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .bg-gradient-btn { background: linear-gradient(135deg, theme('colors.primary'), theme('colors.secondary')); transition: opacity 0.3s ease; }
-        .bg-gradient-btn:hover { opacity: 0.9; box-shadow: theme('boxShadow.neon-strong'); }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scale=no">
+<title>MC Server Panel</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+--bg-primary:#0a0a0f;--bg-secondary:#12121a;--bg-tertiary:#1a1a2e;--bg-card:#16162a;
+--bg-hover:#1e1e3a;--bg-active:#252545;--border-primary:#2a2a4a;--border-glow:#7c3aed40;
+--text-primary:#f0f0ff;--text-secondary:#a0a0c0;--text-muted:#606080;
+--accent:#7c3aed;--accent-hover:#9333ea;--accent-glow:#7c3aed30;
+--success:#10b981;--warning:#f59e0b;--danger:#ef4444;--info:#3b82f6;
+--radius:12px;--radius-sm:8px;--radius-lg:16px;
+--shadow:0 4px 24px rgba(0,0,0,0.4);--shadow-glow:0 0 30px var(--accent-glow);
+--transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
+--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;
+}
+html{font-family:var(--font);background:var(--bg-primary);color:var(--text-primary);
+-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;overflow:hidden;height:100%}
+body{height:100%;overflow:hidden}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-primary);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--accent)}
 
-        /* Terminal Fixes - Crucial for Wrapping */
-        .term-container { min-width: 0; width: 100%; height: 100%; border-radius: 16px; overflow: hidden; position: relative; }
-        .term-wrapper { padding: 16px; height: 100%; width: 100%; }
-        .xterm .xterm-viewport { overflow-y: auto !important; width: 100% !important; }
-        .xterm-screen { width: 100% !important; }
-        
-        /* Custom Scrollbars */
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: theme('colors.border'); border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: theme('colors.primary'); }
+.app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
 
-        /* SVG Circular Progress */
-        .progress-ring__circle { transition: stroke-dashoffset 0.5s ease-in-out; transform: rotate(-90deg); transform-origin: 50% 50%; }
-        
-        /* Layout Transitions */
-        .fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .hidden-tab { display: none !important; }
+/* Top Bar */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:0 16px;
+height:52px;min-height:52px;background:var(--bg-secondary);
+border-bottom:1px solid var(--border-primary);z-index:100;gap:12px;
+backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.topbar-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;white-space:nowrap}
+.topbar-brand svg{color:var(--accent)}
+.topbar-status{display:flex;align-items:center;gap:6px;padding:4px 12px;
+border-radius:20px;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase}
+.status-online{background:#10b98118;color:#10b981;border:1px solid #10b98130}
+.status-offline{background:#ef444418;color:#ef4444;border:1px solid #ef444430}
+.topbar-stats{display:flex;align-items:center;gap:4px}
+.stat-chip{display:flex;align-items:center;gap:6px;padding:5px 10px;
+background:var(--bg-tertiary);border:1px solid var(--border-primary);
+border-radius:var(--radius-sm);font-size:11px;font-weight:500;white-space:nowrap}
+.stat-chip .stat-val{font-weight:700;color:var(--text-primary);font-variant-numeric:tabular-nums}
+.stat-chip .stat-lbl{color:var(--text-muted);font-size:10px}
+.stat-bar-wrap{width:40px;height:4px;background:var(--bg-primary);border-radius:2px;overflow:hidden}
+.stat-bar-fill{height:100%;border-radius:2px;transition:width 0.6s ease}
+.hamburger{display:none;background:none;border:none;color:var(--text-primary);cursor:pointer;padding:4px}
 
-        /* Pulse Animation */
-        @keyframes pulse-glow { 0%, 100% { opacity: 1; box-shadow: 0 0 10px #8BE9FD; } 50% { opacity: 0.5; box-shadow: 0 0 2px #8BE9FD; } }
-        .status-dot { width: 8px; height: 8px; background-color: theme('colors.accent'); border-radius: 50%; animation: pulse-glow 2s infinite; }
-    </style>
+/* Navigation Tabs */
+.nav-tabs{display:flex;align-items:center;gap:2px;padding:0 16px;
+height:42px;min-height:42px;background:var(--bg-secondary);
+border-bottom:1px solid var(--border-primary);overflow-x:auto}
+.nav-tab{display:flex;align-items:center;gap:6px;padding:8px 14px;
+font-size:12px;font-weight:500;color:var(--text-secondary);
+border-radius:var(--radius-sm) var(--radius-sm) 0 0;cursor:pointer;
+transition:var(--transition);white-space:nowrap;border:none;background:none;
+border-bottom:2px solid transparent;position:relative}
+.nav-tab:hover{color:var(--text-primary);background:var(--bg-hover)}
+.nav-tab.active{color:var(--accent);background:var(--bg-tertiary);border-bottom-color:var(--accent)}
+.nav-tab svg{width:14px;height:14px;flex-shrink:0}
+
+/* Main Content */
+.main-content{flex:1;overflow:hidden;position:relative}
+.panel{display:none;height:100%;flex-direction:column;overflow:hidden}
+.panel.active{display:flex}
+
+/* Console */
+.console-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.console-output{flex:1;overflow-y:auto;padding:12px 16px;font-family:var(--font-mono);
+font-size:12.5px;line-height:1.7;background:var(--bg-primary);scroll-behavior:smooth;
+-webkit-overflow-scrolling:touch}
+.console-line{padding:1px 0;word-break:break-all;animation:fadeIn 0.15s ease}
+.console-line:hover{background:var(--bg-hover);border-radius:2px}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.console-line .timestamp{color:var(--text-muted);margin-right:8px;font-size:11px;user-select:none}
+.log-info{color:#60a5fa}.log-warn{color:#fbbf24}.log-error{color:#f87171}
+.log-server{color:#a78bfa}.log-chat{color:#34d399}.log-default{color:var(--text-secondary)}
+.console-input-wrap{display:flex;gap:8px;padding:10px 16px;background:var(--bg-secondary);
+border-top:1px solid var(--border-primary);align-items:center}
+.console-prefix{color:var(--accent);font-family:var(--font-mono);font-size:13px;
+font-weight:700;user-select:none;flex-shrink:0}
+.console-input{flex:1;background:var(--bg-tertiary);border:1px solid var(--border-primary);
+color:var(--text-primary);font-family:var(--font-mono);font-size:12.5px;padding:8px 12px;
+border-radius:var(--radius-sm);outline:none;transition:var(--transition)}
+.console-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.console-input::placeholder{color:var(--text-muted)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:7px 14px;
+font-size:12px;font-weight:600;border:1px solid var(--border-primary);border-radius:var(--radius-sm);
+cursor:pointer;transition:var(--transition);background:var(--bg-tertiary);color:var(--text-primary);
+white-space:nowrap;font-family:var(--font)}
+.btn:hover{background:var(--bg-hover);border-color:var(--accent)}
+.btn:active{transform:scale(0.97)}
+.btn-accent{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-accent:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn-danger{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn-danger:hover{background:#dc2626;border-color:#dc2626}
+.btn-sm{padding:5px 10px;font-size:11px}
+.btn-icon{padding:6px;width:32px;height:32px}
+.btn svg{width:14px;height:14px;flex-shrink:0}
+.console-toolbar{display:flex;align-items:center;gap:6px;padding:6px 16px;
+background:var(--bg-secondary);border-bottom:1px solid var(--border-primary);
+overflow-x:auto;flex-wrap:nowrap}
+.console-toolbar .btn{flex-shrink:0}
+.quick-cmds{display:flex;gap:4px;flex-wrap:nowrap;overflow-x:auto;flex:1}
+.quick-cmds .btn{font-size:10px;padding:4px 8px;background:var(--bg-card);color:var(--text-secondary)}
+.quick-cmds .btn:hover{color:var(--text-primary);background:var(--accent);border-color:var(--accent)}
+
+/* File Manager */
+.fm-container{display:flex;flex-direction:column;height:100%;overflow:hidden}
+.fm-toolbar{display:flex;align-items:center;gap:8px;padding:10px 16px;
+background:var(--bg-secondary);border-bottom:1px solid var(--border-primary);flex-wrap:wrap}
+.fm-path{display:flex;align-items:center;gap:2px;flex:1;min-width:200px;overflow-x:auto;flex-wrap:nowrap}
+.fm-crumb{padding:4px 8px;font-size:11px;color:var(--text-secondary);cursor:pointer;
+border-radius:var(--radius-sm);transition:var(--transition);white-space:nowrap;
+background:none;border:none;font-family:var(--font)}
+.fm-crumb:hover{background:var(--bg-hover);color:var(--text-primary)}
+.fm-crumb.active{color:var(--accent);font-weight:600}
+.fm-crumb-sep{color:var(--text-muted);font-size:10px;user-select:none}
+.fm-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.fm-list{width:100%}
+.fm-item{display:flex;align-items:center;gap:10px;padding:9px 16px;cursor:pointer;
+transition:var(--transition);border-bottom:1px solid var(--border-primary)}
+.fm-item:hover{background:var(--bg-hover)}
+.fm-item.selected{background:var(--accent-glow);border-left:3px solid var(--accent)}
+.fm-icon{width:18px;height:18px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+.fm-icon.folder{color:#fbbf24}.fm-icon.file{color:var(--text-muted)}
+.fm-icon.jar{color:#ef4444}.fm-icon.yml{color:#10b981}.fm-icon.json{color:#f59e0b}
+.fm-icon.properties{color:#3b82f6}.fm-icon.log{color:#8b5cf6}.fm-icon.img{color:#ec4899}
+.fm-name{flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-size{font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.fm-actions{display:flex;gap:2px;opacity:0;transition:var(--transition)}
+.fm-item:hover .fm-actions{opacity:1}
+.fm-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+padding:60px 20px;color:var(--text-muted);gap:12px}
+.fm-empty svg{width:48px;height:48px;opacity:0.3}
+
+/* Editor */
+.editor-container{display:flex;flex-direction:column;height:100%;overflow:hidden}
+.editor-header{display:flex;align-items:center;gap:10px;padding:10px 16px;
+background:var(--bg-secondary);border-bottom:1px solid var(--border-primary)}
+.editor-filename{font-size:13px;font-weight:600;color:var(--accent);flex:1;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.editor-textarea{flex:1;width:100%;resize:none;background:var(--bg-primary);
+color:var(--text-primary);font-family:var(--font-mono);font-size:12.5px;
+line-height:1.6;padding:16px;border:none;outline:none;tab-size:4;
+-webkit-overflow-scrolling:touch}
+.editor-textarea::placeholder{color:var(--text-muted)}
+
+/* Dashboard Cards */
+.dashboard{padding:16px;overflow-y:auto;-webkit-overflow-scrolling:touch;height:100%}
+.dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.dash-card{background:var(--bg-card);border:1px solid var(--border-primary);
+border-radius:var(--radius);padding:20px;transition:var(--transition)}
+.dash-card:hover{border-color:var(--accent);box-shadow:var(--shadow-glow)}
+.dash-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.dash-card-title{font-size:13px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px}
+.dash-card-icon{width:36px;height:36px;border-radius:var(--radius-sm);display:flex;
+align-items:center;justify-content:center}
+.dash-card-icon.cpu{background:#7c3aed20;color:#7c3aed}
+.dash-card-icon.ram{background:#3b82f620;color:#3b82f6}
+.dash-card-icon.disk{background:#10b98120;color:#10b981}
+.dash-card-icon.status{background:#f59e0b20;color:#f59e0b}
+.dash-metric{font-size:32px;font-weight:800;line-height:1;margin-bottom:4px;
+font-variant-numeric:tabular-nums;letter-spacing:-1px}
+.dash-metric-sub{font-size:12px;color:var(--text-muted)}
+.dash-progress{width:100%;height:6px;background:var(--bg-primary);border-radius:3px;
+margin-top:12px;overflow:hidden}
+.dash-progress-fill{height:100%;border-radius:3px;transition:width 0.8s cubic-bezier(0.4,0,0.2,1)}
+.color-green{color:var(--success)}.color-yellow{color:var(--warning)}
+.color-red{color:var(--danger)}.color-blue{color:var(--info)}.color-purple{color:var(--accent)}
+.fill-green{background:var(--success)}.fill-yellow{background:var(--warning)}
+.fill-red{background:var(--danger)}.fill-blue{background:var(--info)}.fill-purple{background:var(--accent)}
+
+/* Upload Overlay */
+.upload-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);
+backdrop-filter:blur(8px);z-index:200;align-items:center;justify-content:center}
+.upload-overlay.active{display:flex}
+.upload-modal{background:var(--bg-card);border:1px solid var(--border-primary);
+border-radius:var(--radius-lg);padding:32px;width:min(440px,90vw);text-align:center}
+.upload-zone{border:2px dashed var(--border-primary);border-radius:var(--radius);
+padding:40px 20px;margin:20px 0;transition:var(--transition);cursor:pointer}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--accent);background:var(--accent-glow)}
+.upload-zone svg{width:40px;height:40px;color:var(--text-muted);margin-bottom:12px}
+.upload-zone p{font-size:13px;color:var(--text-secondary)}
+
+/* Toast Notifications */
+.toast-container{position:fixed;bottom:20px;right:20px;z-index:300;display:flex;flex-direction:column;gap:8px}
+.toast{padding:12px 16px;border-radius:var(--radius-sm);font-size:12px;font-weight:500;
+animation:toastIn 0.3s ease,toastOut 0.3s ease 2.7s forwards;display:flex;align-items:center;gap:8px;
+box-shadow:var(--shadow);max-width:min(360px,calc(100vw - 40px))}
+.toast-success{background:#065f46;border:1px solid #10b98150;color:#d1fae5}
+.toast-error{background:#7f1d1d;border:1px solid #ef444450;color:#fee2e2}
+.toast-info{background:#1e3a5f;border:1px solid #3b82f650;color:#dbeafe}
+@keyframes toastIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:translateX(0)}}
+@keyframes toastOut{from{opacity:1}to{opacity:0;transform:translateY(10px)}}
+
+/* Context Menu */
+.ctx-menu{position:fixed;background:var(--bg-card);border:1px solid var(--border-primary);
+border-radius:var(--radius-sm);padding:4px;z-index:250;min-width:160px;
+box-shadow:var(--shadow);display:none}
+.ctx-menu.active{display:block}
+.ctx-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:12px;
+color:var(--text-secondary);cursor:pointer;border-radius:4px;transition:var(--transition);
+border:none;background:none;width:100%;text-align:left;font-family:var(--font)}
+.ctx-item:hover{background:var(--bg-hover);color:var(--text-primary)}
+.ctx-item.danger{color:var(--danger)}
+.ctx-item.danger:hover{background:#ef444420}
+.ctx-item svg{width:14px;height:14px;flex-shrink:0}
+.ctx-sep{height:1px;background:var(--border-primary);margin:4px 0}
+
+/* Connection indicator */
+.conn-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.conn-dot.connected{background:var(--success);box-shadow:0 0 6px var(--success)}
+.conn-dot.disconnected{background:var(--danger);box-shadow:0 0 6px var(--danger)}
+
+/* Responsive */
+@media(max-width:768px){
+  .topbar{padding:0 10px;height:48px;min-height:48px}
+  .topbar-stats{display:none}
+  .topbar-brand span{display:none}
+  .hamburger{display:flex}
+  .nav-tabs{height:38px;min-height:38px;padding:0 8px;gap:0}
+  .nav-tab{padding:6px 10px;font-size:11px}
+  .nav-tab span{display:none}
+  .console-output{padding:8px;font-size:11px;line-height:1.5}
+  .console-input-wrap{padding:8px 10px}
+  .console-toolbar{padding:4px 8px}
+  .fm-toolbar{padding:8px 10px}
+  .fm-item{padding:8px 10px}
+  .fm-actions{opacity:1}
+  .dashboard{padding:10px}
+  .dash-grid{grid-template-columns:1fr}
+  .dash-metric{font-size:26px}
+  .stat-chip{padding:3px 6px;font-size:10px}
+  .mobile-stats{display:flex !important}
+}
+@media(max-width:480px){
+  .nav-tabs{overflow-x:auto}
+  .console-toolbar{flex-wrap:nowrap;overflow-x:auto}
+  .quick-cmds .btn{padding:3px 6px;font-size:9px}
+}
+.mobile-stats{display:none;gap:4px;padding:6px 10px;background:var(--bg-secondary);
+border-bottom:1px solid var(--border-primary);overflow-x:auto}
+
+/* Loading skeleton */
+.skeleton{background:linear-gradient(90deg,var(--bg-tertiary) 25%,var(--bg-hover) 50%,var(--bg-tertiary) 75%);
+background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:4px}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* Smooth transitions for panels */
+.panel{animation:panelIn 0.2s ease}
+@keyframes panelIn{from{opacity:0}to{opacity:1}}
+
+.search-input{background:var(--bg-tertiary);border:1px solid var(--border-primary);
+color:var(--text-primary);font-size:12px;padding:5px 10px;border-radius:var(--radius-sm);
+outline:none;transition:var(--transition);width:140px;font-family:var(--font)}
+.search-input:focus{border-color:var(--accent);width:200px}
+@media(max-width:768px){.search-input{width:100px}.search-input:focus{width:140px}}
+</style>
 </head>
-<body class="flex flex-col md:flex-row h-[100dvh] w-full selection:bg-primary/30 selection:text-white">
+<body>
+<div class="app">
+  <!-- Top Bar -->
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:10px">
+      <button class="hamburger" onclick="toggleMobileStats()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h14M3 10h14M3 14h14"/></svg>
+      </button>
+      <div class="topbar-brand">
+        <svg width="22" height="22" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="M8 12h8M12 8v8"/></svg>
+        <span>MC Panel</span>
+      </div>
+      <div class="topbar-status" id="serverStatus">
+        <div class="conn-dot disconnected" id="connDot"></div>
+        <span id="statusText">CONNECTING</span>
+      </div>
+    </div>
+    <div class="topbar-stats" id="topbarStats">
+      <div class="stat-chip" title="CPU Usage (2 vCPU)">
+        <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="1" width="10" height="10" rx="2"/><path d="M4 4h4M4 6h4M4 8h2"/></svg>
+        <div><div class="stat-val" id="cpuTopVal">0%</div><div class="stat-lbl">CPU</div></div>
+        <div class="stat-bar-wrap"><div class="stat-bar-fill fill-purple" id="cpuTopBar" style="width:0%"></div></div>
+      </div>
+      <div class="stat-chip" title="RAM Usage (16 GB)">
+        <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="1" width="8" height="10" rx="1"/><path d="M4 11v1M8 11v1M1 4h10"/></svg>
+        <div><div class="stat-val" id="ramTopVal">0 MB</div><div class="stat-lbl">RAM</div></div>
+        <div class="stat-bar-wrap"><div class="stat-bar-fill fill-blue" id="ramTopBar" style="width:0%"></div></div>
+      </div>
+      <div class="stat-chip" title="Storage">
+        <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="6" cy="4" rx="5" ry="2"/><path d="M1 4v4c0 1.1 2.2 2 5 2s5-.9 5-2V4"/></svg>
+        <div><div class="stat-val" id="diskTopVal">-- GB</div><div class="stat-lbl">DISK</div></div>
+        <div class="stat-bar-wrap"><div class="stat-bar-fill fill-green" id="diskTopBar" style="width:0%"></div></div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Mobile Stats (hidden by default) -->
+  <div class="mobile-stats" id="mobileStats">
+    <div class="stat-chip"><span class="stat-val" id="cpuMobVal">0%</span><span class="stat-lbl">CPU</span></div>
+    <div class="stat-chip"><span class="stat-val" id="ramMobVal">0 MB</span><span class="stat-lbl">RAM</span></div>
+    <div class="stat-chip"><span class="stat-val" id="diskMobVal">--</span><span class="stat-lbl">DISK</span></div>
+  </div>
 
-    <!-- Mobile Top Header -->
-    <header class="md:hidden glass-card mx-4 mt-4 mb-2 p-4 flex justify-between items-center z-20 shrink-0 border-white/5 rounded-2xl relative overflow-hidden">
-        <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary to-secondary opacity-50"></div>
-        <div class="flex items-center gap-2">
-            <i class="ph-fill ph-hexagon text-3xl text-secondary"></i>
-            <h1 class="font-bold text-lg tracking-wide text-white">Mine<span class="text-gradient">Space</span></h1>
+  <!-- Navigation Tabs -->
+  <div class="nav-tabs">
+    <button class="nav-tab active" data-tab="dashboard" onclick="switchTab('dashboard')">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>Dashboard</span>
+    </button>
+    <button class="nav-tab" data-tab="console" onclick="switchTab('console')">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      <span>Console</span>
+    </button>
+    <button class="nav-tab" data-tab="files" onclick="switchTab('files')">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      <span>Files</span>
+    </button>
+    <button class="nav-tab" data-tab="editor" onclick="switchTab('editor')" id="editorTab" style="display:none">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      <span>Editor</span>
+    </button>
+  </div>
+
+  <!-- Main Content Area -->
+  <div class="main-content">
+
+    <!-- Dashboard Panel -->
+    <div class="panel active" id="panel-dashboard">
+      <div class="dashboard">
+        <div class="dash-grid">
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <div class="dash-card-title">CPU Usage</div>
+              <div class="dash-card-icon cpu">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="16" height="16" rx="3"/><path d="M6 6h8M6 10h8M6 14h4"/></svg>
+              </div>
+            </div>
+            <div class="dash-metric color-purple" id="cpuDashVal">0%</div>
+            <div class="dash-metric-sub">of 2 vCPU Cores</div>
+            <div class="dash-progress"><div class="dash-progress-fill fill-purple" id="cpuDashBar" style="width:0%"></div></div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <div class="dash-card-title">Memory</div>
+              <div class="dash-card-icon ram">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="1" width="14" height="16" rx="2"/><path d="M6 17v2M14 17v2M10 17v2M1 6h18"/></svg>
+              </div>
+            </div>
+            <div class="dash-metric color-blue" id="ramDashVal">0 MB</div>
+            <div class="dash-metric-sub" id="ramDashSub">of 16,384 MB</div>
+            <div class="dash-progress"><div class="dash-progress-fill fill-blue" id="ramDashBar" style="width:0%"></div></div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <div class="dash-card-title">Storage</div>
+              <div class="dash-card-icon disk">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="10" cy="6" rx="8" ry="3"/><path d="M2 6v5c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M2 11v5c0 1.7 3.6 3 8 3s8-1.3 8-3v-5"/></svg>
+              </div>
+            </div>
+            <div class="dash-metric color-green" id="diskDashVal">-- GB</div>
+            <div class="dash-metric-sub" id="diskDashSub">loading...</div>
+            <div class="dash-progress"><div class="dash-progress-fill fill-green" id="diskDashBar" style="width:0%"></div></div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <div class="dash-card-title">Server Status</div>
+              <div class="dash-card-icon status">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 13 12"/></svg>
+              </div>
+            </div>
+            <div class="dash-metric" id="uptimeVal" style="font-size:24px;color:var(--text-primary)">--</div>
+            <div class="dash-metric-sub" id="uptimeSub">Container uptime</div>
+          </div>
         </div>
-        <div class="flex items-center gap-2 px-3 py-1 bg-accent/10 border border-accent/20 rounded-full">
-            <div class="status-dot"></div>
-            <span class="text-xs font-semibold text-accent uppercase tracking-wider">Online</span>
-        </div>
-    </header>
-
-    <!-- Desktop Sidebar -->
-    <aside class="hidden md:flex flex-col w-64 glass-card m-4 mr-0 p-6 z-20 shrink-0 border-white/5 rounded-3xl relative overflow-hidden shadow-neon">
-        <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary to-secondary"></div>
-        
-        <div class="flex items-center gap-3 mb-12">
-            <i class="ph-fill ph-hexagon text-4xl text-secondary"></i>
-            <div>
-                <h1 class="font-bold text-xl tracking-wide text-white leading-tight">Mine<span class="text-gradient">Space</span></h1>
-                <p class="text-[10px] text-gray-500 font-mono uppercase tracking-widest">Engine Server</p>
-            </div>
-        </div>
-
-        <nav class="flex-grow flex flex-col gap-2">
-            <button onclick="switchTab('dashboard')" id="btn-desktop-dashboard" class="flex items-center gap-3 w-full px-4 py-3 rounded-xl bg-gradient-to-r from-primary/20 to-secondary/10 text-white border border-white/10 font-medium transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
-                <i class="ph ph-squares-four text-xl text-secondary"></i> Dashboard
-            </button>
-            <button onclick="switchTab('files')" id="btn-desktop-files" class="flex items-center gap-3 w-full px-4 py-3 rounded-xl text-gray-400 hover:text-white hover:bg-surface border border-transparent transition-all">
-                <i class="ph ph-folder text-xl"></i> File Manager
-            </button>
-        </nav>
-
-        <div class="mt-auto bg-surface/50 border border-border p-4 rounded-2xl flex items-center justify-between">
-            <div class="flex flex-col">
-                <span class="text-xs text-gray-400">Status</span>
-                <span class="text-sm font-semibold text-accent">Active Container</span>
-            </div>
-            <div class="status-dot"></div>
-        </div>
-    </aside>
-
-    <!-- Main Content Area -->
-    <main class="flex-grow flex flex-col p-4 overflow-hidden min-w-0">
-        
-        <!-- DASHBOARD TAB -->
-        <div id="tab-dashboard" class="h-full flex flex-col gap-4 fade-in min-w-0">
-            
-            <!-- Top Stats Row -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 shrink-0">
-                <!-- Data Usage (RAM) Card -->
-                <div class="glass-card p-4 md:p-5 flex items-center gap-4 col-span-1 md:col-span-2 relative overflow-hidden group">
-                    <div class="absolute -right-10 -top-10 w-32 h-32 bg-primary/10 rounded-full blur-2xl group-hover:bg-primary/20 transition-all"></div>
-                    <div class="relative w-16 h-16 shrink-0">
-                        <svg class="w-full h-full" viewBox="0 0 100 100">
-                            <circle class="text-surface stroke-current" stroke-width="8" cx="50" cy="50" r="40" fill="transparent"></circle>
-                            <circle id="ram-ring" class="text-primary stroke-current progress-ring__circle" stroke-width="8" stroke-linecap="round" cx="50" cy="50" r="40" fill="transparent" stroke-dasharray="251.2" stroke-dashoffset="251.2"></circle>
-                        </svg>
-                        <div class="absolute inset-0 flex items-center justify-center"><i class="ph ph-memory text-primary text-xl"></i></div>
-                    </div>
-                    <div>
-                        <p class="text-xs text-gray-400 uppercase tracking-wider font-semibold">Memory Usage</p>
-                        <div class="flex items-baseline gap-1 mt-1">
-                            <h2 class="text-2xl font-bold text-white font-mono" id="ram-text">0.0</h2>
-                            <span class="text-sm text-gray-500 font-mono">/ 16 GB</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- CPU Card -->
-                <div class="glass-card p-4 md:p-5 flex items-center gap-4 col-span-1 md:col-span-2 relative overflow-hidden group">
-                    <div class="absolute -right-10 -top-10 w-32 h-32 bg-secondary/10 rounded-full blur-2xl group-hover:bg-secondary/20 transition-all"></div>
-                    <div class="relative w-16 h-16 shrink-0">
-                        <svg class="w-full h-full" viewBox="0 0 100 100">
-                            <circle class="text-surface stroke-current" stroke-width="8" cx="50" cy="50" r="40" fill="transparent"></circle>
-                            <circle id="cpu-ring" class="text-secondary stroke-current progress-ring__circle" stroke-width="8" stroke-linecap="round" cx="50" cy="50" r="40" fill="transparent" stroke-dasharray="251.2" stroke-dashoffset="251.2"></circle>
-                        </svg>
-                        <div class="absolute inset-0 flex items-center justify-center"><i class="ph ph-cpu text-secondary text-xl"></i></div>
-                    </div>
-                    <div>
-                        <p class="text-xs text-gray-400 uppercase tracking-wider font-semibold">Processor</p>
-                        <div class="flex items-baseline gap-1 mt-1">
-                            <h2 class="text-2xl font-bold text-white font-mono" id="cpu-text">0%</h2>
-                            <span class="text-sm text-gray-500 font-mono">of 2 Cores</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Terminal Area -->
-            <div class="glass-card flex-grow flex flex-col overflow-hidden shadow-neon relative border-white/10">
-                <!-- Terminal Header -->
-                <div class="bg-surface/80 px-4 py-3 flex justify-between items-center border-b border-border z-10">
-                    <div class="flex items-center gap-2">
-                        <i class="ph ph-terminal-window text-gray-400"></i>
-                        <span class="text-sm font-semibold text-gray-200">Live Console</span>
-                    </div>
-                    <div class="flex gap-1.5">
-                        <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
-                        <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
-                        <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
-                    </div>
-                </div>
-                
-                <!-- Actual Terminal -->
-                <div class="term-container bg-[#08080C] flex-grow">
-                    <div id="terminal" class="term-wrapper"></div>
-                </div>
-
-                <!-- Input Box -->
-                <div class="p-3 bg-surface/50 border-t border-border z-10 flex gap-2">
-                    <div class="relative flex-grow">
-                        <i class="ph ph-caret-right absolute left-3 top-1/2 -translate-y-1/2 text-primary text-lg"></i>
-                        <input type="text" id="cmd-input" class="w-full bg-[#0B0C10] border border-border focus:border-primary text-gray-200 rounded-xl pl-9 pr-4 py-2.5 text-sm font-mono transition-all outline-none" placeholder="Enter server command...">
-                    </div>
-                    <button onclick="sendCommand()" class="bg-gradient-btn px-4 rounded-xl text-white shadow-lg flex items-center justify-center shrink-0">
-                        <i class="ph ph-paper-plane-right text-lg"></i>
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <!-- FILES TAB -->
-        <div id="tab-files" class="hidden-tab h-full flex flex-col glass-card border-white/10 overflow-hidden shadow-neon">
-            
-            <!-- File Header / Actions -->
-            <div class="bg-surface/80 p-4 border-b border-border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <div class="flex items-center gap-2 text-sm font-mono text-gray-400 overflow-x-auto whitespace-nowrap w-full sm:w-auto" id="breadcrumbs">
-                    <!-- Injected via JS -->
-                </div>
-                
-                <div class="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-                    <input type="file" id="file-upload" class="hidden" onchange="uploadFile(event)">
-                    <button onclick="document.getElementById('file-upload').click()" class="bg-gradient-btn flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white transition-all shadow-lg">
-                        <i class="ph ph-upload-simple text-base"></i> Upload
-                    </button>
-                    <button onclick="loadFiles(currentPath)" class="bg-surface hover:bg-border border border-border px-3 py-2 rounded-xl text-gray-300 transition-colors">
-                        <i class="ph ph-arrows-clockwise text-base"></i>
-                    </button>
-                </div>
-            </div>
-            
-            <!-- List Headers -->
-            <div class="hidden sm:grid grid-cols-12 gap-4 px-6 py-3 bg-[#0B0C10]/50 border-b border-border text-xs font-bold text-gray-500 uppercase tracking-wider">
-                <div class="col-span-7">File Name</div>
-                <div class="col-span-3 text-right">Size</div>
-                <div class="col-span-2 text-right">Actions</div>
-            </div>
-
-            <!-- File List Items -->
-            <div class="flex-grow overflow-y-auto bg-[#08080C] p-2" id="file-list">
-                <!-- Injected via JS -->
-            </div>
-        </div>
-
-    </main>
-
-    <!-- Mobile Bottom Navigation -->
-    <nav class="md:hidden glass-card mx-4 mb-4 mt-0 p-2 flex justify-around items-center z-20 shrink-0 border-white/5 rounded-2xl">
-        <button onclick="switchTab('dashboard')" id="btn-mobile-dashboard" class="flex flex-col items-center gap-1 p-2 w-16 rounded-xl text-primary transition-all">
-            <i class="ph-fill ph-squares-four text-2xl"></i>
-            <span class="text-[10px] font-semibold">Panel</span>
-        </button>
-        <button onclick="switchTab('files')" id="btn-mobile-files" class="flex flex-col items-center gap-1 p-2 w-16 rounded-xl text-gray-500 transition-all">
-            <i class="ph-fill ph-folder text-2xl"></i>
-            <span class="text-[10px] font-semibold">Files</span>
-        </button>
-    </nav>
-
-    <!-- Code Editor Modal -->
-    <div id="editor-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden items-center justify-center p-4 z-50 opacity-0 transition-opacity duration-300">
-        <div class="glass-card border-white/10 w-full max-w-4xl h-[85vh] flex flex-col shadow-[0_0_50px_rgba(0,0,0,0.8)] transform scale-95 transition-transform duration-300" id="editor-card">
-            <div class="bg-surface/80 px-4 py-3 flex justify-between items-center border-b border-border">
-                <div class="flex items-center gap-2 text-sm font-mono text-gray-300">
-                    <i class="ph ph-file-code text-secondary text-lg"></i>
-                    <span id="editor-title">filename.txt</span>
-                </div>
-                <div class="flex items-center gap-2">
-                    <button onclick="closeEditor()" class="px-3 py-1.5 hover:bg-border rounded-lg text-xs font-medium text-gray-400 transition-colors">Cancel</button>
-                    <button onclick="saveFile()" class="bg-gradient-btn px-4 py-1.5 text-white rounded-lg text-xs font-bold transition-all shadow-neon flex items-center gap-1.5">
-                        <i class="ph ph-floppy-disk"></i> Save
-                    </button>
-                </div>
-            </div>
-            <textarea id="editor-content" class="flex-grow bg-[#05050A] text-gray-300 p-4 font-mono text-xs sm:text-sm resize-none focus:outline-none w-full leading-relaxed" spellcheck="false"></textarea>
-        </div>
+      </div>
     </div>
 
-    <!-- Modern Toast Notifications -->
-    <div id="toast-container" class="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none"></div>
+    <!-- Console Panel -->
+    <div class="panel" id="panel-console">
+      <div class="console-wrap">
+        <div class="console-toolbar">
+          <button class="btn btn-sm" onclick="sendCmd('list')" title="List Players">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 10a3 3 0 100-6 3 3 0 000 6zM1 12a6 6 0 0112 0"/></svg>
+            Players
+          </button>
+          <div class="quick-cmds">
+            <button class="btn" onclick="sendCmd('tps')">TPS</button>
+            <button class="btn" onclick="sendCmd('gc')">GC</button>
+            <button class="btn" onclick="sendCmd('mem')">Mem</button>
+            <button class="btn" onclick="sendCmd('version')">Ver</button>
+            <button class="btn" onclick="sendCmd('plugins')">Plugins</button>
+            <button class="btn" onclick="sendCmd('whitelist list')">WL</button>
+            <button class="btn" onclick="sendCmd('save-all')">Save</button>
+          </div>
+          <button class="btn btn-sm btn-danger" onclick="if(confirm('Stop the server?'))sendCmd('stop')" title="Stop Server">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="1" width="10" height="10" rx="1"/></svg>
+            Stop
+          </button>
+          <button class="btn btn-sm btn-icon" onclick="clearConsole()" title="Clear Console">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1l10 10M11 1L1 11"/></svg>
+          </button>
+          <button class="btn btn-sm btn-icon" onclick="scrollToBottom()" title="Scroll to Bottom">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 1v10M2 7l4 4 4-4"/></svg>
+          </button>
+        </div>
+        <div class="console-output" id="consoleOutput"></div>
+        <div class="console-input-wrap">
+          <span class="console-prefix">$</span>
+          <input class="console-input" id="consoleInput" type="text" placeholder="Type a command..." autocomplete="off" spellcheck="false">
+          <button class="btn btn-accent" onclick="sendCurrentCmd()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 1l11 6-11 6V1z"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
 
-    <script>
-        // --- Toast System ---
-        function showToast(message, type = 'info') {
-            const container = document.getElementById('toast-container');
-            const toast = document.createElement('div');
-            
-            let icon = '<i class="ph-fill ph-info text-blue-400 text-lg"></i>';
-            if(type === 'success') icon = '<i class="ph-fill ph-check-circle text-green-400 text-lg"></i>';
-            if(type === 'error') icon = '<i class="ph-fill ph-warning-circle text-red-400 text-lg"></i>';
+    <!-- Files Panel -->
+    <div class="panel" id="panel-files">
+      <div class="fm-container">
+        <div class="fm-toolbar">
+          <div class="fm-path" id="fmBreadcrumb"></div>
+          <input class="search-input" type="text" placeholder="Filter..." id="fmSearch" oninput="filterFiles()">
+          <button class="btn btn-sm" onclick="refreshFiles()" title="Refresh">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1v4h4M11 11v-4h-4"/><path d="M10.4 5A5 5 0 003 3.5L1 5M1.6 7a5 5 0 007.4 1.5L11 7"/></svg>
+          </button>
+          <button class="btn btn-sm" onclick="showUploadModal()" title="Upload File">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 10V2M2 6l4-4 4 4"/><path d="M1 10v1a1 1 0 001 1h8a1 1 0 001-1v-1"/></svg>
+            Upload
+          </button>
+          <button class="btn btn-sm" onclick="createNewFile()" title="New File">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 1v10M1 6h10"/></svg>
+            New
+          </button>
+        </div>
+        <div class="fm-body" id="fmBody">
+          <div class="fm-empty"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg><span>Loading files...</span></div>
+        </div>
+      </div>
+    </div>
 
-            toast.className = `flex items-center gap-3 bg-surface border border-border text-sm text-white px-4 py-3 rounded-xl shadow-2xl translate-x-10 opacity-0 transition-all duration-300`;
-            toast.innerHTML = `${icon} <span class="font-medium">${message}</span>`;
-            
-            container.appendChild(toast);
-            
-            requestAnimationFrame(() => toast.classList.remove('translate-x-10', 'opacity-0'));
-            setTimeout(() => {
-                toast.classList.add('translate-x-10', 'opacity-0');
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
-        }
+    <!-- Editor Panel -->
+    <div class="panel" id="panel-editor">
+      <div class="editor-container">
+        <div class="editor-header">
+          <button class="btn btn-sm" onclick="closeEditor()">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 1L1 6l9 5"/></svg>
+            Back
+          </button>
+          <div class="editor-filename" id="editorFilename">No file open</div>
+          <button class="btn btn-sm btn-accent" onclick="saveFile()" id="editorSaveBtn">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1h8l2 2v8a1 1 0 01-1 1H2a1 1 0 01-1-1V2a1 1 0 011-1z"/><path d="M4 1v3h4V1M3 7h6v4H3z"/></svg>
+            Save
+          </button>
+          <button class="btn btn-sm" onclick="downloadCurrentFile()">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 1v8M2 6l4 4 4-4"/><path d="M1 10v1a1 1 0 001 1h8a1 1 0 001-1v-1"/></svg>
+          </button>
+        </div>
+        <textarea class="editor-textarea" id="editorContent" placeholder="File contents will appear here..." spellcheck="false"></textarea>
+      </div>
+    </div>
+  </div>
+</div>
 
-        // --- Navigation Logic ---
-        function switchTab(tab) {
-            // Hide all
-            document.getElementById('tab-dashboard').classList.add('hidden-tab');
-            document.getElementById('tab-files').classList.add('hidden-tab');
-            
-            // Reset Desktop Nav
-            document.getElementById('btn-desktop-dashboard').className = "flex items-center gap-3 w-full px-4 py-3 rounded-xl text-gray-400 hover:text-white hover:bg-surface border border-transparent transition-all";
-            document.getElementById('btn-desktop-files').className = "flex items-center gap-3 w-full px-4 py-3 rounded-xl text-gray-400 hover:text-white hover:bg-surface border border-transparent transition-all";
-            
-            // Reset Mobile Nav
-            document.getElementById('btn-mobile-dashboard').className = "flex flex-col items-center gap-1 p-2 w-16 rounded-xl text-gray-500 transition-all";
-            document.getElementById('btn-mobile-files').className = "flex flex-col items-center gap-1 p-2 w-16 rounded-xl text-gray-500 transition-all";
-            
-            // Activate Tab
-            document.getElementById('tab-' + tab).classList.remove('hidden-tab');
-            document.getElementById('tab-' + tab).classList.add('fade-in');
-            
-            // Activate Buttons
-            document.getElementById('btn-desktop-' + tab).className = "flex items-center gap-3 w-full px-4 py-3 rounded-xl bg-gradient-to-r from-primary/20 to-secondary/10 text-white border border-white/10 font-medium transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]";
-            document.getElementById('btn-mobile-' + tab).className = "flex flex-col items-center gap-1 p-2 w-16 rounded-xl text-primary transition-all";
+<!-- Upload Modal -->
+<div class="upload-overlay" id="uploadOverlay" onclick="if(event.target===this)hideUploadModal()">
+  <div class="upload-modal">
+    <h3 style="font-size:16px;font-weight:700;margin-bottom:4px">Upload File</h3>
+    <p style="font-size:12px;color:var(--text-muted)" id="uploadPathDisplay">to /</p>
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('uploadFileInput').click()">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M20 16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2"/></svg>
+      <p>Click or drag files here</p>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:4px" id="uploadFileName">No file selected</p>
+    </div>
+    <input type="file" id="uploadFileInput" style="display:none" onchange="handleFileSelect(this)">
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="hideUploadModal()">Cancel</button>
+      <button class="btn btn-accent" onclick="doUpload()" id="uploadBtn">Upload</button>
+    </div>
+  </div>
+</div>
 
-            // Fit terminal if dashboard is opened
-            if(tab === 'dashboard' && fitAddon) { setTimeout(() => fitAddon.fit(), 100); }
-            if(tab === 'files' && !currentPathLoaded) { loadFiles(''); currentPathLoaded = true; }
-        }
+<!-- Context Menu -->
+<div class="ctx-menu" id="ctxMenu">
+  <button class="ctx-item" onclick="ctxAction('open')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>Open</button>
+  <button class="ctx-item" onclick="ctxAction('edit')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit</button>
+  <button class="ctx-item" onclick="ctxAction('download')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 16V4M8 12l4 4 4-4"/><path d="M20 16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2"/></svg>Download</button>
+  <button class="ctx-item" onclick="ctxAction('rename')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>Rename</button>
+  <div class="ctx-sep"></div>
+  <button class="ctx-item danger" onclick="ctxAction('delete')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>Delete</button>
+</div>
 
-        // --- Terminal Logic (Wrapped heavily) ---
-        const term = new Terminal({ 
-            theme: { background: 'transparent', foreground: '#f8f8f2', cursor: '#9D4EDD', selectionBackground: 'rgba(157, 78, 221, 0.4)' }, 
-            convertEol: true, cursorBlink: true, fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 400,
-            disableStdin: false
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-        term.open(document.getElementById('terminal'));
-        
-        // Ensure resizing works properly
-        const resizeObserver = new ResizeObserver(() => {
-            if(!document.getElementById('tab-dashboard').classList.contains('hidden-tab')) {
-                requestAnimationFrame(() => fitAddon.fit());
-            }
-        });
-        resizeObserver.observe(document.querySelector('.term-container'));
-        setTimeout(() => fitAddon.fit(), 200);
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
 
-        const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-        let ws;
-        
-        function connectWS() {
-            ws = new WebSocket(wsUrl);
-            ws.onopen = () => term.write('\\x1b[35m\\x1b[1m[System]\\x1b[0m Connected to secure datastream.\\r\\n');
-            ws.onmessage = e => term.write(e.data + '\\n');
-            ws.onclose = () => { term.write('\\r\\n\\x1b[31m\\x1b[1m[System]\\x1b[0m Link severed. Reconnecting...\\r\\n'); setTimeout(connectWS, 3000); };
-        }
-        connectWS();
-        
-        const cmdInput = document.getElementById('cmd-input');
-        cmdInput.addEventListener('keypress', e => { if (e.key === 'Enter') sendCommand(); });
+<script>
+// ========== STATE ==========
+let ws=null, wsConnected=false, currentPath='', editingFile='', cmdHistory=[], cmdHistoryIdx=-1;
+let ctxTarget=null, allFileItems=[], autoScroll=true, startTime=Date.now();
+const consoleEl=document.getElementById('consoleOutput');
+const consoleInput=document.getElementById('consoleInput');
 
-        function sendCommand() {
-            const val = cmdInput.value.trim();
-            if(val && ws && ws.readyState === WebSocket.OPEN) { 
-                term.write(`\\x1b[90m> ${val}\\x1b[0m\\r\\n`);
-                ws.send(val); 
-                cmdInput.value = ''; 
-            }
-        }
+// ========== TABS ==========
+function switchTab(tab){
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  document.getElementById('panel-'+tab).classList.add('active');
+  if(tab==='files')loadFiles(currentPath);
+  if(tab==='console')requestAnimationFrame(()=>scrollToBottom());
+}
 
-        // --- System Stats Polling ---
-        function setProgress(id, percent) {
-            const circle = document.getElementById(id);
-            const radius = circle.r.baseVal.value;
-            const circumference = radius * 2 * Math.PI;
-            const offset = circumference - (percent / 100) * circumference;
-            circle.style.strokeDasharray = `${circumference} ${circumference}`;
-            circle.style.strokeDashoffset = offset;
-        }
+// ========== WEBSOCKET ==========
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws');
+  ws.onopen=()=>{wsConnected=true;updateStatus(true);toast('Connected to server','success')};
+  ws.onclose=()=>{wsConnected=false;updateStatus(false);setTimeout(connectWS,2000)};
+  ws.onerror=()=>{wsConnected=false;updateStatus(false)};
+  ws.onmessage=e=>{appendConsole(e.data)};
+}
+function updateStatus(online){
+  const dot=document.getElementById('connDot');
+  const txt=document.getElementById('statusText');
+  const wrap=document.getElementById('serverStatus');
+  dot.className='conn-dot '+(online?'connected':'disconnected');
+  txt.textContent=online?'ONLINE':'OFFLINE';
+  wrap.className='topbar-status '+(online?'status-online':'status-offline');
+}
 
-        async function fetchStats() {
-            try {
-                const res = await fetch('/api/stats');
-                const data = await res.json();
-                
-                // Update RAM
-                const ramPercent = Math.min(100, (data.ram_used_mb / 1024 / 16) * 100);
-                document.getElementById('ram-text').innerText = (data.ram_used_mb / 1024).toFixed(1);
-                setProgress('ram-ring', ramPercent);
+// ========== CONSOLE ==========
+function classifyLine(text){
+  const t=text.toLowerCase();
+  if(t.includes('error')||t.includes('exception')||t.includes('severe')||t.includes('fatal'))return 'log-error';
+  if(t.includes('warn'))return 'log-warn';
+  if(t.includes('info'))return 'log-info';
+  if(t.includes('server')||t.includes('starting')||t.includes('done'))return 'log-server';
+  if(t.includes('<')||t.includes('joined')||t.includes('left'))return 'log-chat';
+  return 'log-default';
+}
+function appendConsole(text){
+  const div=document.createElement('div');
+  div.className='console-line '+classifyLine(text);
+  const now=new Date();
+  const ts=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0')+':'+String(now.getSeconds()).padStart(2,'0');
+  div.innerHTML='<span class="timestamp">'+ts+'</span>'+escapeHtml(text);
+  consoleEl.appendChild(div);
+  // Keep max 500 lines in DOM
+  while(consoleEl.children.length>500)consoleEl.removeChild(consoleEl.firstChild);
+  if(autoScroll)scrollToBottom();
+}
+function scrollToBottom(){consoleEl.scrollTop=consoleEl.scrollHeight}
+function clearConsole(){consoleEl.innerHTML='';toast('Console cleared','info')}
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
-                // Update CPU (data.cpu_percent is 0 to 100 relative to 2 cores)
-                document.getElementById('cpu-text').innerText = data.cpu_percent.toFixed(0) + '%';
-                setProgress('cpu-ring', data.cpu_percent);
-                
-            } catch (e) { console.error('Stats error:', e); }
-        }
-        setInterval(fetchStats, 2000);
-        fetchStats();
+consoleEl.addEventListener('scroll',()=>{
+  const atBottom=consoleEl.scrollHeight-consoleEl.scrollTop-consoleEl.clientHeight<50;
+  autoScroll=atBottom;
+});
 
-        // --- File Manager Logic ---
-        let currentPath = '';
-        let currentPathLoaded = false;
-        let editingFilePath = '';
+function sendCmd(cmd){
+  if(ws&&ws.readyState===1){ws.send(cmd);appendConsole('> '+cmd)}
+  else toast('Not connected','error');
+}
+function sendCurrentCmd(){
+  const v=consoleInput.value.trim();
+  if(!v)return;
+  cmdHistory.unshift(v);if(cmdHistory.length>50)cmdHistory.pop();cmdHistoryIdx=-1;
+  sendCmd(v);consoleInput.value='';
+}
+consoleInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();sendCurrentCmd()}
+  if(e.key==='ArrowUp'){e.preventDefault();if(cmdHistoryIdx<cmdHistory.length-1){cmdHistoryIdx++;consoleInput.value=cmdHistory[cmdHistoryIdx]}}
+  if(e.key==='ArrowDown'){e.preventDefault();if(cmdHistoryIdx>0){cmdHistoryIdx--;consoleInput.value=cmdHistory[cmdHistoryIdx]}else{cmdHistoryIdx=-1;consoleInput.value=''}}
+  if(e.key==='Tab'){e.preventDefault();/* Could add tab completion */}
+});
 
-        function renderBreadcrumbs(path) {
-            const parts = path.split('/').filter(p => p);
-            let html = `<button onclick="loadFiles('')" class="hover:text-white transition-colors"><i class="ph-fill ph-house text-lg"></i></button>`;
-            let buildPath = '';
-            
-            if (parts.length > 0) {
-                parts.forEach((part, index) => {
-                    buildPath += (buildPath ? '/' : '') + part;
-                    html += ` <i class="ph ph-caret-right text-xs mx-2 opacity-50"></i> `;
-                    if(index === parts.length - 1) {
-                        html += `<span class="text-secondary font-semibold">${part}</span>`;
-                    } else {
-                        html += `<button onclick="loadFiles('${buildPath}')" class="hover:text-white transition-colors">${part}</button>`;
-                    }
-                });
-            }
-            document.getElementById('breadcrumbs').innerHTML = html;
-        }
+// ========== STATS ==========
+function getColorForPercent(p){return p>=90?'red':p>=70?'yellow':'green'}
+async function fetchStats(){
+  try{
+    const r=await fetch('/api/stats');const d=await r.json();
+    const cpuP=Math.min(100,d.cpu_percent||0).toFixed(1);
+    const ramMB=(d.ram_used_mb||0).toFixed(0);
+    const ramP=((d.ram_used_mb||0)/16384*100).toFixed(1);
+    const diskUsedGB=(d.disk_used_gb||0).toFixed(1);
+    const diskTotalGB=(d.disk_total_gb||0).toFixed(1);
+    const diskP=diskTotalGB>0?((d.disk_used_gb/d.disk_total_gb)*100).toFixed(1):'0';
+    const cpuCol=getColorForPercent(cpuP);
+    const ramCol=getColorForPercent(ramP);
+    const diskCol=getColorForPercent(diskP);
+    
+    // Topbar
+    document.getElementById('cpuTopVal').textContent=cpuP+'%';
+    document.getElementById('cpuTopBar').style.width=cpuP+'%';
+    document.getElementById('cpuTopBar').className='stat-bar-fill fill-'+cpuCol;
+    document.getElementById('ramTopVal').textContent=ramMB+' MB';
+    document.getElementById('ramTopBar').style.width=ramP+'%';
+    document.getElementById('ramTopBar').className='stat-bar-fill fill-'+ramCol;
+    document.getElementById('diskTopVal').textContent=diskUsedGB+' GB';
+    document.getElementById('diskTopBar').style.width=diskP+'%';
+    document.getElementById('diskTopBar').className='stat-bar-fill fill-'+diskCol;
 
-        async function loadFiles(path) {
-            currentPath = path;
-            renderBreadcrumbs(path);
-            const list = document.getElementById('file-list');
-            list.innerHTML = `<div class="flex justify-center py-10"><i class="ph ph-spinner-gap animate-spin text-3xl text-primary"></i></div>`;
+    // Mobile
+    document.getElementById('cpuMobVal').textContent=cpuP+'%';
+    document.getElementById('ramMobVal').textContent=ramMB+' MB';
+    document.getElementById('diskMobVal').textContent=diskUsedGB+'G';
 
-            try {
-                const res = await fetch(`/api/fs/list?path=${encodeURIComponent(path)}`);
-                if(!res.ok) throw new Error('Failed to load');
-                const files = await res.json();
-                list.innerHTML = '';
-                
-                if (path !== '') {
-                    const parent = path.split('/').slice(0, -1).join('/');
-                    list.innerHTML += `
-                        <div class="flex items-center px-4 py-3 cursor-pointer hover:bg-surface/80 rounded-xl transition-all mb-1 border border-transparent hover:border-border" onclick="loadFiles('${parent}')">
-                            <i class="ph ph-arrow-u-up-left text-gray-500 mr-3 text-lg"></i>
-                            <span class="text-sm font-mono text-gray-400">Return to parent directory</span>
-                        </div>`;
-                }
+    // Dashboard
+    document.getElementById('cpuDashVal').textContent=cpuP+'%';
+    document.getElementById('cpuDashBar').style.width=cpuP+'%';
+    document.getElementById('cpuDashBar').className='dash-progress-fill fill-'+cpuCol;
+    document.getElementById('cpuDashVal').className='dash-metric color-'+cpuCol;
 
-                if(files.length === 0 && path === '') {
-                    list.innerHTML += `<div class="text-center py-12 text-gray-600 text-sm">Space is empty</div>`;
-                }
+    document.getElementById('ramDashVal').textContent=ramMB+' MB';
+    document.getElementById('ramDashSub').textContent=ramP+'% of 16,384 MB';
+    document.getElementById('ramDashBar').style.width=ramP+'%';
+    document.getElementById('ramDashBar').className='dash-progress-fill fill-'+ramCol;
+    document.getElementById('ramDashVal').className='dash-metric color-'+ramCol;
 
-                files.forEach(f => {
-                    const icon = f.is_dir ? '<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400"><i class="ph-fill ph-folder text-xl"></i></div>' : '<div class="p-2 bg-surface border border-border rounded-lg text-gray-400"><i class="ph-fill ph-file text-xl"></i></div>';
-                    const sizeStr = f.is_dir ? '--' : (f.size > 1024*1024 ? (f.size/(1024*1024)).toFixed(1) + ' MB' : (f.size / 1024).toFixed(1) + ' KB');
-                    const fullPath = path ? `${path}/${f.name}` : f.name;
-                    const actionClick = f.is_dir ? `onclick="loadFiles('${fullPath}')"` : '';
-                    const pointer = f.is_dir ? 'cursor-pointer' : '';
+    document.getElementById('diskDashVal').textContent=diskUsedGB+' GB';
+    document.getElementById('diskDashSub').textContent=diskP+'% of '+diskTotalGB+' GB';
+    document.getElementById('diskDashBar').style.width=diskP+'%';
+    document.getElementById('diskDashBar').className='dash-progress-fill fill-'+diskCol;
+    document.getElementById('diskDashVal').className='dash-metric color-'+diskCol;
 
-                    list.innerHTML += `
-                        <div class="flex flex-col sm:grid sm:grid-cols-12 items-start sm:items-center px-4 py-3 gap-3 group hover:bg-surface/50 rounded-xl transition-all mb-1 border border-transparent hover:border-border">
-                            <div class="col-span-7 flex items-center gap-3 w-full ${pointer}" ${actionClick}>
-                                ${icon}
-                                <span class="text-sm font-mono text-gray-300 truncate group-hover:text-primary transition-colors">${f.name}</span>
-                            </div>
-                            <div class="col-span-3 text-right text-xs text-gray-500 font-mono hidden sm:block">${sizeStr}</div>
-                            <div class="col-span-2 flex justify-end gap-2 w-full sm:w-auto mt-2 sm:mt-0 sm:opacity-0 group-hover:opacity-100 transition-opacity">
-                                ${!f.is_dir ? `<button onclick="editFile('${fullPath}')" class="p-2 bg-surface border border-border text-gray-400 hover:text-accent hover:border-accent/50 rounded-lg transition-colors" title="Edit"><i class="ph ph-pencil-simple text-sm"></i></button>` : ''}
-                                ${!f.is_dir ? `<a href="/api/fs/download?path=${encodeURIComponent(fullPath)}" class="p-2 bg-surface border border-border text-gray-400 hover:text-green-400 hover:border-green-400/50 rounded-lg transition-colors inline-block" title="Download"><i class="ph ph-download-simple text-sm"></i></a>` : ''}
-                                <button onclick="deleteFile('${fullPath}')" class="p-2 bg-surface border border-border text-gray-400 hover:text-red-400 hover:border-red-400/50 rounded-lg transition-colors" title="Delete"><i class="ph ph-trash text-sm"></i></button>
-                            </div>
-                        </div>`;
-                });
-            } catch (err) {
-                showToast("Failed to load directory", "error");
-            }
-        }
+    // Uptime
+    const upSec=Math.floor((Date.now()-startTime)/1000);
+    const h=Math.floor(upSec/3600),m=Math.floor((upSec%3600)/60),s=upSec%60;
+    document.getElementById('uptimeVal').textContent=
+      (h>0?h+'h ':'')+(m>0?m+'m ':'')+s+'s';
+    document.getElementById('uptimeSub').textContent='Session uptime';
+  }catch(e){}
+}
+setInterval(fetchStats,2000);
+fetchStats();
 
-        async function editFile(path) {
-            try {
-                const res = await fetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-                if(res.ok) {
-                    const text = await res.text();
-                    editingFilePath = path;
-                    document.getElementById('editor-content').value = text;
-                    document.getElementById('editor-title').innerText = path.split('/').pop();
-                    
-                    const modal = document.getElementById('editor-modal');
-                    const card = document.getElementById('editor-card');
-                    modal.classList.remove('hidden');
-                    modal.classList.add('flex');
-                    
-                    requestAnimationFrame(() => {
-                        modal.classList.remove('opacity-0');
-                        card.classList.remove('scale-95');
-                    });
-                } else { showToast('Cannot open file (might be binary)', 'error'); }
-            } catch { showToast('Failed to open file', 'error'); }
-        }
+// ========== FILE MANAGER ==========
+function formatSize(b){
+  if(b===0)return'--';
+  if(b<1024)return b+' B';
+  if(b<1048576)return(b/1024).toFixed(1)+' KB';
+  if(b<1073741824)return(b/1048576).toFixed(1)+' MB';
+  return(b/1073741824).toFixed(2)+' GB';
+}
+function getFileIcon(name,isDir){
+  if(isDir)return{cls:'folder',svg:'<path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>'};
+  const ext=name.split('.').pop().toLowerCase();
+  const map={jar:{cls:'jar',i:'☕'},yml:{cls:'yml',i:'⚙'},yaml:{cls:'yml',i:'⚙'},
+    json:{cls:'json',i:'{}'},properties:{cls:'properties',i:'🔧'},log:{cls:'log',i:'📜'},
+    txt:{cls:'file',i:'📄'},png:{cls:'img',i:'🖼'},jpg:{cls:'img',i:'🖼'},gif:{cls:'img',i:'🖼'},
+    toml:{cls:'yml',i:'⚙'},conf:{cls:'properties',i:'🔧'},cfg:{cls:'properties',i:'🔧'},
+    sk:{cls:'yml',i:'📜'},sh:{cls:'log',i:'⚡'},bat:{cls:'log',i:'⚡'}};
+  const m=map[ext]||{cls:'file',i:'📄'};
+  return{cls:m.cls,text:m.i};
+}
 
-        function closeEditor() {
-            const modal = document.getElementById('editor-modal');
-            const card = document.getElementById('editor-card');
-            modal.classList.add('opacity-0');
-            card.classList.add('scale-95');
-            setTimeout(() => { modal.classList.add('hidden'); modal.classList.remove('flex'); }, 300);
-        }
+async function loadFiles(path){
+  currentPath=path||'';
+  buildBreadcrumb();
+  const body=document.getElementById('fmBody');
+  body.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-muted)"><div class="skeleton" style="height:20px;width:60%;margin:8px auto"></div><div class="skeleton" style="height:20px;width:80%;margin:8px auto"></div><div class="skeleton" style="height:20px;width:50%;margin:8px auto"></div></div>';
+  try{
+    const r=await fetch('/api/fs/list?path='+encodeURIComponent(currentPath));
+    allFileItems=await r.json();
+    renderFiles(allFileItems);
+  }catch(e){body.innerHTML='<div class="fm-empty"><span>Failed to load</span></div>'}
+}
 
-        async function saveFile() {
-            const content = document.getElementById('editor-content').value;
-            const formData = new FormData();
-            formData.append('path', editingFilePath);
-            formData.append('content', content);
-            try {
-                const res = await fetch('/api/fs/write', { method: 'POST', body: formData });
-                if(res.ok) { showToast('File saved securely', 'success'); closeEditor(); } 
-                else throw new Error();
-            } catch { showToast('Failed to save file', 'error'); }
-        }
+function renderFiles(items){
+  const body=document.getElementById('fmBody');
+  const search=document.getElementById('fmSearch').value.toLowerCase();
+  let filtered=items;
+  if(search)filtered=items.filter(i=>i.name.toLowerCase().includes(search));
+  
+  if(!filtered.length&&!currentPath){body.innerHTML='<div class="fm-empty"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg><span>Directory is empty</span></div>';return}
+  
+  let html='';
+  // Parent directory
+  if(currentPath){
+    html+='<div class="fm-item" ondblclick="goUp()" onclick="goUp()"><div class="fm-icon folder"><svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></div><div class="fm-name" style="color:var(--text-muted)">..</div><div class="fm-size"></div></div>';
+  }
+  filtered.forEach((item,idx)=>{
+    const icon=getFileIcon(item.name,item.is_dir);
+    const iconHtml=icon.svg
+      ?'<svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">'+icon.svg+'</svg>'
+      :'<span style="font-size:16px">'+icon.text+'</span>';
+    html+=`<div class="fm-item" data-name="${escapeHtml(item.name)}" data-dir="${item.is_dir}" data-idx="${idx}"
+      ondblclick="fmDblClick('${escapeHtml(item.name)}',${item.is_dir})"
+      oncontextmenu="fmCtx(event,'${escapeHtml(item.name)}',${item.is_dir})">
+      <div class="fm-icon ${icon.cls}">${iconHtml}</div>
+      <div class="fm-name">${escapeHtml(item.name)}</div>
+      <div class="fm-size">${item.is_dir?'':formatSize(item.size)}</div>
+      <div class="fm-actions">
+        ${!item.is_dir?`<button class="btn btn-sm btn-icon" onclick="event.stopPropagation();editFile('${escapeHtml(item.name)}')" title="Edit"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M8.5 1.5a1.4 1.4 0 012 2L4 10l-2.5.5.5-2.5L8.5 1.5z"/></svg></button>`:''}
+        ${!item.is_dir?`<button class="btn btn-sm btn-icon" onclick="event.stopPropagation();downloadFile('${escapeHtml(item.name)}')" title="Download"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 1v8M3 6l3 3 3-3"/><path d="M1 9v2h10V9"/></svg></button>`:''}
+        <button class="btn btn-sm btn-icon" onclick="event.stopPropagation();deleteItem('${escapeHtml(item.name)}')" title="Delete" style="color:var(--danger)"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 3h10M3.5 3V2a1 1 0 011-1h3a1 1 0 011 1v1M9 3v7a1 1 0 01-1 1H4a1 1 0 01-1-1V3"/></svg></button>
+      </div>
+    </div>`;
+  });
+  body.innerHTML='<div class="fm-list">'+html+'</div>';
+}
 
-        async function deleteFile(path) {
-            if(confirm('Delete ' + path.split('/').pop() + ' permanently?')) {
-                const formData = new FormData(); formData.append('path', path);
-                try {
-                    const res = await fetch('/api/fs/delete', { method: 'POST', body: formData });
-                    if(res.ok) { showToast('Data purged', 'success'); loadFiles(currentPath); } 
-                    else throw new Error();
-                } catch { showToast('Failed to delete', 'error'); }
-            }
-        }
+function filterFiles(){renderFiles(allFileItems)}
+function buildBreadcrumb(){
+  const el=document.getElementById('fmBreadcrumb');
+  const parts=currentPath?currentPath.split('/').filter(Boolean):[];
+  let html='<button class="fm-crumb '+(parts.length===0?'active':'')+'" onclick="loadFiles(\\'\\')">root</button>';
+  let acc='';
+  parts.forEach((p,i)=>{
+    acc+=(acc?'/':'')+p;
+    const a=acc;
+    html+='<span class="fm-crumb-sep">/</span>';
+    html+='<button class="fm-crumb '+(i===parts.length-1?'active':'')+'" onclick="loadFiles(\''+a+'\')">'+escapeHtml(p)+'</button>';
+  });
+  el.innerHTML=html;
+}
+function goUp(){
+  const parts=currentPath.split('/').filter(Boolean);
+  parts.pop();
+  loadFiles(parts.join('/'));
+}
+function fmDblClick(name,isDir){
+  if(isDir)loadFiles((currentPath?currentPath+'/':'')+name);
+  else editFile(name);
+}
 
-        async function uploadFile(e) {
-            const fileInput = e.target;
-            if(!fileInput.files.length) return;
-            
-            showToast('Encrypting & Uploading...', 'info');
-            const formData = new FormData();
-            formData.append('path', currentPath);
-            formData.append('file', fileInput.files[0]);
-            
-            try {
-                const res = await fetch('/api/fs/upload', { method: 'POST', body: formData });
-                if(res.ok) { showToast('Upload complete', 'success'); loadFiles(currentPath); } 
-                else throw new Error();
-            } catch { showToast('Upload failed', 'error'); }
-            fileInput.value = '';
-        }
-    </script>
+async function editFile(name){
+  const fpath=(currentPath?currentPath+'/':'')+name;
+  try{
+    const r=await fetch('/api/fs/read?path='+encodeURIComponent(fpath));
+    if(!r.ok){toast('Cannot open: '+await r.text(),'error');return}
+    const text=await r.text();
+    editingFile=fpath;
+    document.getElementById('editorFilename').textContent=fpath;
+    document.getElementById('editorContent').value=text;
+    document.getElementById('editorTab').style.display='';
+    switchTab('editor');
+    toast('Opened '+name,'info');
+  }catch(e){toast('Failed to open file','error')}
+}
+async function saveFile(){
+  if(!editingFile)return;
+  try{
+    const fd=new FormData();
+    fd.append('path',editingFile);
+    fd.append('content',document.getElementById('editorContent').value);
+    const r=await fetch('/api/fs/write',{method:'POST',body:fd});
+    if(r.ok)toast('Saved '+editingFile,'success');
+    else toast('Save failed','error');
+  }catch(e){toast('Save error','error')}
+}
+function closeEditor(){
+  switchTab('files');
+  document.getElementById('editorTab').style.display='none';
+}
+function downloadFile(name){
+  const fpath=(currentPath?currentPath+'/':'')+name;
+  window.open('/api/fs/download?path='+encodeURIComponent(fpath),'_blank');
+}
+function downloadCurrentFile(){
+  if(editingFile)window.open('/api/fs/download?path='+encodeURIComponent(editingFile),'_blank');
+}
+async function deleteItem(name){
+  if(!confirm('Delete "'+name+'"?'))return;
+  const fpath=(currentPath?currentPath+'/':'')+name;
+  try{
+    const fd=new FormData();fd.append('path',fpath);
+    await fetch('/api/fs/delete',{method:'POST',body:fd});
+    toast('Deleted '+name,'success');
+    loadFiles(currentPath);
+  }catch(e){toast('Delete failed','error')}
+}
+async function createNewFile(){
+  const name=prompt('Enter filename (or foldername/):');
+  if(!name)return;
+  const fpath=(currentPath?currentPath+'/':'')+name;
+  if(name.endsWith('/')){
+    // Create directory by writing a temp file and deleting it — or we can use the write endpoint
+    toast('Creating directories not supported yet','info');
+    return;
+  }
+  try{
+    const fd=new FormData();fd.append('path',fpath);fd.append('content','');
+    await fetch('/api/fs/write',{method:'POST',body:fd});
+    toast('Created '+name,'success');
+    loadFiles(currentPath);
+  }catch(e){toast('Failed','error')}
+}
+
+// Upload
+function showUploadModal(){
+  document.getElementById('uploadOverlay').classList.add('active');
+  document.getElementById('uploadPathDisplay').textContent='to /'+(currentPath||'');
+  document.getElementById('uploadFileName').textContent='No file selected';
+  document.getElementById('uploadFileInput').value='';
+}
+function hideUploadModal(){document.getElementById('uploadOverlay').classList.remove('active')}
+function handleFileSelect(inp){
+  if(inp.files.length)document.getElementById('uploadFileName').textContent=inp.files[0].name;
+}
+async function doUpload(){
+  const inp=document.getElementById('uploadFileInput');
+  if(!inp.files.length){toast('Select a file first','error');return}
+  const fd=new FormData();fd.append('path',currentPath);fd.append('file',inp.files[0]);
+  document.getElementById('uploadBtn').textContent='Uploading...';
+  try{
+    await fetch('/api/fs/upload',{method:'POST',body:fd});
+    toast('Uploaded '+inp.files[0].name,'success');
+    hideUploadModal();
+    loadFiles(currentPath);
+  }catch(e){toast('Upload failed','error')}
+  document.getElementById('uploadBtn').textContent='Upload';
+}
+// Drag & drop
+const uploadZone=document.getElementById('uploadZone');
+uploadZone.addEventListener('dragover',e=>{e.preventDefault();uploadZone.classList.add('dragover')});
+uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop',e=>{
+  e.preventDefault();uploadZone.classList.remove('dragover');
+  if(e.dataTransfer.files.length){
+    document.getElementById('uploadFileInput').files=e.dataTransfer.files;
+    document.getElementById('uploadFileName').textContent=e.dataTransfer.files[0].name;
+  }
+});
+
+// Context Menu
+function fmCtx(e,name,isDir){
+  e.preventDefault();e.stopPropagation();
+  ctxTarget={name,isDir};
+  const menu=document.getElementById('ctxMenu');
+  menu.classList.add('active');
+  // Position
+  const x=Math.min(e.clientX,window.innerWidth-170);
+  const y=Math.min(e.clientY,window.innerHeight-200);
+  menu.style.left=x+'px';menu.style.top=y+'px';
+}
+document.addEventListener('click',()=>document.getElementById('ctxMenu').classList.remove('active'));
+function ctxAction(action){
+  if(!ctxTarget)return;
+  const{name,isDir}=ctxTarget;
+  document.getElementById('ctxMenu').classList.remove('active');
+  switch(action){
+    case'open':fmDblClick(name,isDir);break;
+    case'edit':if(!isDir)editFile(name);break;
+    case'download':if(!isDir)downloadFile(name);break;
+    case'rename':
+      const nn=prompt('Rename to:',name);
+      if(nn&&nn!==name)toast('Rename not implemented yet','info');
+      break;
+    case'delete':deleteItem(name);break;
+  }
+}
+
+// ========== TOAST ==========
+function toast(msg,type='info'){
+  const c=document.getElementById('toastContainer');
+  const t=document.createElement('div');
+  t.className='toast toast-'+type;
+  const icons={success:'✓',error:'✕',info:'ℹ'};
+  t.innerHTML='<span>'+(icons[type]||'ℹ')+'</span><span>'+escapeHtml(msg)+'</span>';
+  c.appendChild(t);
+  setTimeout(()=>t.remove(),3000);
+}
+
+// ========== MOBILE ==========
+function toggleMobileStats(){
+  const el=document.getElementById('mobileStats');
+  el.style.display=el.style.display==='flex'?'none':'flex';
+}
+
+// ========== KEYBOARD SHORTCUTS ==========
+document.addEventListener('keydown',e=>{
+  if(e.ctrlKey&&e.key==='s'){e.preventDefault();if(editingFile)saveFile()}
+  if(e.ctrlKey&&e.key==='`'){e.preventDefault();switchTab('console');consoleInput.focus()}
+});
+
+// ========== INIT ==========
+connectWS();
+loadFiles('');
+</script>
 </body>
 </html>
 """
@@ -599,7 +935,8 @@ async def read_stream(stream, prefix=""):
     while True:
         try:
             line = await stream.readline()
-            if not line: break
+            if not line:
+                break
             line_str = line.decode('utf-8', errors='replace').rstrip('\r\n')
             await broadcast(prefix + line_str)
         except Exception:
@@ -653,68 +990,91 @@ async def websocket_endpoint(websocket: WebSocket):
                 mc_process.stdin.write((cmd + "\n").encode('utf-8'))
                 await mc_process.stdin.drain()
     except:
-        connected_clients.remove(websocket)
+        connected_clients.discard(websocket)
 
 @app.get("/api/stats")
 def get_stats():
-    """ 
-    Calculates CPU & RAM only for the Python Panel and its Minecraft Child Process.
-    Limits visual CPU percentage to 2 Cores (HuggingFace free limit).
-    """
     try:
         current_process = psutil.Process(os.getpid())
         mem_usage = current_process.memory_info().rss
-        cpu_percent = current_process.cpu_percent()
+        cpu_percent = current_process.cpu_percent(interval=0)
 
-        # Add all children (The Java Minecraft Process)
         for child in current_process.children(recursive=True):
             try:
                 mem_usage += child.memory_info().rss
-                cpu_percent += child.cpu_percent()
-            except psutil.NoSuchProcess:
+                cpu_percent += child.cpu_percent(interval=0)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        
-        # CPU returned by psutil can be 200% for 2 cores. 
-        # We divide by 2 to get a standard 0-100% representation for 2 cores.
-        normalized_cpu = min(100.0, cpu_percent / 2.0)
-        
+
+        # Normalize CPU to 0-100% for 2 cores
+        normalized_cpu = min(100.0, cpu_percent / CONTAINER_CPU_CORES)
+
+        # Disk usage for the container's BASE_DIR
+        try:
+            disk = shutil.disk_usage(BASE_DIR)
+            disk_used_gb = disk.used / (1024 ** 3)
+            disk_total_gb = disk.total / (1024 ** 3)
+        except Exception:
+            disk_used_gb = 0
+            disk_total_gb = CONTAINER_STORAGE_GB
+
         return {
-            "ram_used_mb": mem_usage / (1024 * 1024),
-            "cpu_percent": normalized_cpu
+            "ram_used_mb": round(mem_usage / (1024 * 1024), 1),
+            "ram_total_mb": CONTAINER_RAM_MB,
+            "cpu_percent": round(normalized_cpu, 1),
+            "cpu_cores": CONTAINER_CPU_CORES,
+            "disk_used_gb": round(disk_used_gb, 2),
+            "disk_total_gb": round(disk_total_gb, 2),
         }
     except Exception:
-        # Fallback if psutil fails entirely to not crash UI
-        return {"ram_used_mb": 0, "cpu_percent": 0}
+        return {
+            "ram_used_mb": 0, "ram_total_mb": CONTAINER_RAM_MB,
+            "cpu_percent": 0, "cpu_cores": CONTAINER_CPU_CORES,
+            "disk_used_gb": 0, "disk_total_gb": CONTAINER_STORAGE_GB,
+        }
 
 @app.get("/api/fs/list")
 def fs_list(path: str = ""):
     target = get_safe_path(path)
-    if not os.path.exists(target): return []
+    if not os.path.exists(target):
+        return []
     items = []
-    for f in os.listdir(target):
-        fp = os.path.join(target, f)
-        items.append({"name": f, "is_dir": os.path.isdir(fp), "size": os.path.getsize(fp) if not os.path.isdir(fp) else 0})
+    try:
+        for f in os.listdir(target):
+            fp = os.path.join(target, f)
+            try:
+                is_dir = os.path.isdir(fp)
+                size = 0 if is_dir else os.path.getsize(fp)
+                items.append({"name": f, "is_dir": is_dir, "size": size})
+            except OSError:
+                pass
+    except PermissionError:
+        pass
     return sorted(items, key=lambda x: (not x["is_dir"], x["name"].lower()))
 
 @app.get("/api/fs/read")
 def fs_read(path: str):
     target = get_safe_path(path)
-    if not os.path.isfile(target): raise HTTPException(400, "Not a file")
+    if not os.path.isfile(target):
+        raise HTTPException(400, "Not a file")
     try:
-        with open(target, 'r', encoding='utf-8') as f:
-            return Response(content=f.read(), media_type="text/plain")
-    except UnicodeDecodeError:
-        raise HTTPException(400, "File is binary")
+        with open(target, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read(5 * 1024 * 1024)  # Max 5MB read
+        return Response(content=content, media_type="text/plain")
+    except Exception as e:
+        raise HTTPException(400, f"Cannot read: {str(e)}")
 
 @app.get("/api/fs/download")
 def fs_download(path: str):
     target = get_safe_path(path)
-    if not os.path.isfile(target): raise HTTPException(400, "Not a file")
+    if not os.path.isfile(target):
+        raise HTTPException(400, "Not a file")
     return FileResponse(target, filename=os.path.basename(target))
 
 @app.post("/api/fs/write")
 def fs_write(path: str = Form(...), content: str = Form(...)):
     target = get_safe_path(path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, 'w', encoding='utf-8') as f:
         f.write(content)
     return {"status": "ok"}
@@ -722,7 +1082,10 @@ def fs_write(path: str = Form(...), content: str = Form(...)):
 @app.post("/api/fs/upload")
 async def fs_upload(path: str = Form(""), file: UploadFile = File(...)):
     target_dir = get_safe_path(path)
+    os.makedirs(target_dir, exist_ok=True)
     target_file = os.path.join(target_dir, file.filename)
+    if not os.path.abspath(target_file).startswith(BASE_DIR):
+        raise HTTPException(403, "Access denied")
     with open(target_file, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     return {"status": "ok"}
@@ -730,8 +1093,12 @@ async def fs_upload(path: str = Form(""), file: UploadFile = File(...)):
 @app.post("/api/fs/delete")
 def fs_delete(path: str = Form(...)):
     target = get_safe_path(path)
-    if os.path.isdir(target): shutil.rmtree(target)
-    else: os.remove(target)
+    if not os.path.exists(target):
+        raise HTTPException(404, "Not found")
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    else:
+        os.remove(target)
     return {"status": "ok"}
 
 if __name__ == "__main__":
